@@ -3439,8 +3439,11 @@ void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int mot
 }
 
 // Motion compensation works on four pixels at a time, held in one 32 bit word.
-// Loads and stores go through memcpy, so any alignment is fine, and every
-// byte lane is processed independently, so any byte order is fine.
+// The portable path uses memcpy and independent byte lanes (any byte order).
+// A platform header may define PLM_WORD_ACCESS and provide these three
+// functions itself, for example where frames are known to be word aligned.
+
+#ifndef PLM_WORD_ACCESS
 
 static inline uint32_t plm_load_word(const uint8_t *p) {
 	uint32_t word;
@@ -3451,6 +3454,13 @@ static inline uint32_t plm_load_word(const uint8_t *p) {
 static inline void plm_store_word(uint8_t *p, uint32_t word) {
 	memcpy(p, &word, sizeof(word));
 }
+
+// Load from a position that plm_store_word() is also used on
+static inline uint32_t plm_load_stored_word(const uint8_t *p) {
+	return plm_load_word(p);
+}
+
+#endif
 
 // (a + b + 1) >> 1 for each of the four bytes, with no carry between them
 // A function rather than a macro: load/extract expressions are evaluated once.
@@ -3482,6 +3492,15 @@ void plm_video_process_macroblock(
 	const uint8_t *sp = s + si;
 	uint8_t *dp = d + di;
 	int mode = (odd_h << 1) | odd_v;
+
+	// A platform header may define PLM_COPY_BLOCK to copy a full-pixel
+	// prediction itself. It returns zero to leave the block to the loop below.
+#ifdef PLM_COPY_BLOCK
+	if (mode == 0 && !interpolate && PLM_COPY_BLOCK(sp, dp, dw, block_size)) {
+		return;
+	}
+#endif
+
 	for (int y = 0; y < block_size; y++, sp += dw, dp += dw) {
 		for (int x = 0; x < block_size; x += 4) {
 			const uint8_t *p = sp + x;
@@ -3510,7 +3529,7 @@ void plm_video_process_macroblock(
 			}
 			if (interpolate) {
 				// (d[di] + prediction + 1) >> 1
-				a = plm_average_word(plm_load_word(dp + x), a);
+				a = plm_average_word(plm_load_stored_word(dp + x), a);
 			}
 			plm_store_word(dp + x, a);
 		}
@@ -3528,10 +3547,14 @@ void plm_video_process_macroblock(
 	PLM_STORE_PIXELS(DEST, v0, v1, v2, v3); \
 	} while (FALSE)
 
+// A platform header may define PLM_STORE_PIXELS, to write the four pixels
+// in one store where block positions are known to be aligned
+#ifndef PLM_STORE_PIXELS
 #define PLM_STORE_PIXELS(DEST, V0, V1, V2, V3) do { \
 	(DEST)[0] = (uint8_t)(V0); (DEST)[1] = (uint8_t)(V1); \
 	(DEST)[2] = (uint8_t)(V2); (DEST)[3] = (uint8_t)(V3); \
 	} while (FALSE)
+#endif
 
 void plm_video_decode_block(plm_video_t *self, int block) {
 

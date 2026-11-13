@@ -16,6 +16,9 @@ only have a first coefficient, motion compensation and block output work four
 pixels at a time, and start codes are found by scanning the buffered data.
 - Optional decoder backends, off by default; see
 [Build options](#build-options).
+- Platform hooks: a platform header can replace word access, block copies, pixel
+stores, the inverse DCT pass and the audio accumulation. See the comments at
+each hook in `pl_mpeg.h`.
 - Two fixes: the last reference frame is returned when a stream ends with a B
 frame, and the end of a buffer is registered when it is signalled while empty.
 
