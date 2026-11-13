@@ -21,7 +21,8 @@ pixels at a time, and start codes are found by scanning the buffered data.
 stores, the inverse DCT pass and the audio accumulation. See the comments at
 each hook in `pl_mpeg.h`.
 - An xcore platform header in [xcore/](xcore/), included automatically on xcore
-targets, with aligned word access and an XS3 vector unit block copy.
+targets, with aligned word access, an XS3 vector unit inverse DCT and block
+copy, and an FMACC synthesis window.
 - Two fixes: the last reference frame is returned when a stream ends with a B
 frame, and the end of a buffer is registered when it is signalled while empty.
 
@@ -98,6 +99,10 @@ platform header provides `PLM_AUDIO_ACCUMULATE`.
 give the same decoded output as the portable code they replace.
 
 - `PLM_MALLOC` must return memory aligned to at least four bytes.
+- `PLM_VIDEO_IDCT_VECTOR` is XS3 only; build `xcore/pl_mpeg_idct_xs3.S`
+alongside the implementation.
+- On XS3, `PLM_AUDIO_FAST_WINDOW` uses the FMACC instruction and does not need
+`fmaf`.
 
 
 ## Encoding for PL_MPEG

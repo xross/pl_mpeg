@@ -6,9 +6,11 @@
  * only names the hooks defined here. Decoded output is the same as that of
  * the portable code each hook replaces.
  *
- * Requirement on the application: PLM_MALLOC must return memory aligned to at
- * least four bytes, so that frames, and therefore macroblock positions in
- * them, are word aligned. */
+ * Requirements on the application:
+ * - PLM_MALLOC must return memory aligned to at least four bytes, so that
+ *   frames, and therefore macroblock positions in them, are word aligned.
+ * - With PLM_VIDEO_IDCT_VECTOR (XS3 only), build pl_mpeg_idct_xs3.S alongside
+ *   the implementation. */
 
 #include <stdint.h>
 
@@ -71,6 +73,40 @@ static inline int plm_xs3_copy_block(const uint8_t *source, uint8_t *destination
     return 1;
 }
 #define PLM_COPY_BLOCK(SOURCE, DEST, STRIDE, SIZE) plm_xs3_copy_block(SOURCE, DEST, STRIDE, SIZE)
+
+/* ---- 16-bit inverse DCT on the vector unit ------------------------------
+ * One pass is 64 eight-term dot products (VLMACCR) and a rounding, saturating
+ * shift (VLSAT), in pl_mpeg_idct_xs3.S. Vector loads need word alignment. */
+#define PLM_VIDEO_BLOCK_ALIGNED __attribute__((aligned(4)))
+#define PLM_IDCT_ALIGNED __attribute__((aligned(8)))
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Output, padded input, Q14 matrix, 16 shifts. */
+void plm_idct_pass_xs3(int16_t *, const int16_t *, const int16_t *, const uint16_t *);
+#ifdef __cplusplus
+}
+#endif
+#ifdef PL_MPEG_IMPLEMENTATION
+static const uint16_t plm_idct_shift13[16] PLM_IDCT_ALIGNED = {
+    13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13};
+static const uint16_t plm_idct_shift17[16] PLM_IDCT_ALIGNED = {
+    17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17};
+#endif
+/* SHIFT is 13 for the first pass and 17 for the second. */
+#define PLM_IDCT_VECTOR_PASS(OUTPUT, INPUT, SHIFT) \
+    plm_idct_pass_xs3((OUTPUT), (INPUT), &plm_idct_matrix[0][0], plm_idct_shift##SHIFT)
+
+/* ---- MP2 synthesis window ------------------------------------------------
+ * Fused multiply-accumulate is one instruction. The kernel is kept out of
+ * line, which measured faster than inlining it into the frame decoder. */
+static inline float plm_xs3_fmacc(float sum, float a, float b)
+{
+    __asm__("fmacc %0, %0, %1, %2" : "+r"(sum) : "r"(a), "r"(b));
+    return sum;
+}
+#define PLM_AUDIO_ACCUMULATE(SUM, A, B) plm_xs3_fmacc(SUM, A, B)
+#define PLM_AUDIO_WINDOW_ATTRIBUTES __attribute__((noinline))
 
 #endif /* __XS3A__ */
 #endif

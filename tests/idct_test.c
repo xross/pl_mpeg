@@ -10,7 +10,11 @@
 #include <stdio.h>
 #include <string.h>
 #ifndef PLM_VIDEO_IDCT
+#ifdef __XS3A__
+#define PLM_VIDEO_IDCT 2
+#else
 #define PLM_VIDEO_IDCT 1
+#endif
 #endif
 #define PLM_NO_STDIO
 #define PL_MPEG_IMPLEMENTATION
