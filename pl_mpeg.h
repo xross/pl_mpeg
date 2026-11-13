@@ -155,7 +155,11 @@ See below for detailed the API documentation.
  * of the same arithmetic: slower than ORIGINAL and not an optimisation.
  * VECTOR is such an implementation, bit-identical to SCALAR16, where a
  * platform header provides one as PLM_IDCT_VECTOR_PASS. NATIVE is VECTOR
- * where there is one and ORIGINAL elsewhere. */
+ * where there is one and ORIGINAL elsewhere.
+ * FAST_SCALE and FAST_WINDOW change only floating-point rounding, using a
+ * reciprocal and fused synthesis accumulation respectively. FAST_WINDOW
+ * requires C99 fmaf (link libm where the platform requires it), unless a
+ * platform header provides PLM_AUDIO_ACCUMULATE. */
 #define PLM_VIDEO_IDCT_ORIGINAL 0
 #define PLM_VIDEO_IDCT_SCALAR16 1
 #define PLM_VIDEO_IDCT_VECTOR 2
@@ -189,6 +193,12 @@ typedef int plm_video_coeff_t;
 #define PLM_VIDEO_DC_SHIFT 3
 #define PLM_VIDEO_BLOCK_SIZE 72
 typedef int16_t plm_video_coeff_t;
+#endif
+#ifndef PLM_AUDIO_FAST_SCALE
+#define PLM_AUDIO_FAST_SCALE 0
+#endif
+#ifndef PLM_AUDIO_FAST_WINDOW
+#define PLM_AUDIO_FAST_WINDOW 0
 #endif
 
 
@@ -3923,6 +3933,15 @@ PLM_DEFINE_FRAME_CONVERT_FUNCTION(plm_frame_to_abgr, 4, 3, 2, 1)
 // -----------------------------------------------------------------------------
 // plm_audio implementation
 
+#if PLM_AUDIO_FAST_WINDOW
+#include "pl_mpeg_audio.h"
+#endif
+#if PLM_AUDIO_FAST_SCALE
+#define PLM_AUDIO_OUTPUT_SCALE(sample) ((sample) * (-1.0f / 1090519040.0f))
+#else
+#define PLM_AUDIO_OUTPUT_SCALE(sample) ((sample) / -1090519040.0f)
+#endif
+
 // Based on kjmp2 by Martin J. Fiedler
 // http://keyj.emphy.de/kjmp2/
 
@@ -4458,6 +4477,9 @@ void plm_audio_decode_frame(plm_audio_t *self) {
 					plm_audio_idct36(self->sample[ch], p, self->V[ch], self->v_pos);
 
 					// Build U, windowing, calculate output
+					#if PLM_AUDIO_FAST_WINDOW
+					plm_audio_synthesis_window(self->U, self->D, self->V[ch], self->v_pos);
+					#else
 					memset(self->U, 0, sizeof(self->U));
 
 					int d_index = 512 - (self->v_pos >> 1);
@@ -4482,18 +4504,20 @@ void plm_audio_decode_frame(plm_audio_t *self) {
 						d_index += 64 - 32;
 					}
 
+					#endif
+
 					// Output samples
 					#ifdef PLM_AUDIO_SEPARATE_CHANNELS
 						float *out_channel = ch == 0
 							? self->samples.left
 							: self->samples.right;
 						for (int j = 0; j < 32; j++) {
-							out_channel[out_pos + j] = self->U[j] / -1090519040.0f;
+							out_channel[out_pos + j] = PLM_AUDIO_OUTPUT_SCALE(self->U[j]);
 						}
 					#else
 						for (int j = 0; j < 32; j++) {
 							self->samples.interleaved[((out_pos + j) << 1) + ch] = 
-								self->U[j] / -1090519040.0f;
+								PLM_AUDIO_OUTPUT_SCALE(self->U[j]);
 						}
 					#endif
 				} // End of synthesis channel loop
