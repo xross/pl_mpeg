@@ -144,6 +144,52 @@ See below for detailed the API documentation.
 #define PL_MPEG_H
 
 #include <stdint.h>
+#include <stddef.h>
+#ifndef PLM_NO_STDIO
+#include <stdio.h>
+#endif
+
+/* Optional decoder backends. Defaults retain the original arithmetic.
+ * SCALAR16 is an orthonormal Q14 transform on 16-bit coefficients, with
+ * different rounding. It is the portable C model for vector implementations
+ * of the same arithmetic: slower than ORIGINAL and not an optimisation.
+ * VECTOR is such an implementation, bit-identical to SCALAR16, where a
+ * platform header provides one as PLM_IDCT_VECTOR_PASS. NATIVE is VECTOR
+ * where there is one and ORIGINAL elsewhere. */
+#define PLM_VIDEO_IDCT_ORIGINAL 0
+#define PLM_VIDEO_IDCT_SCALAR16 1
+#define PLM_VIDEO_IDCT_VECTOR 2
+#ifdef PLM_IDCT_VECTOR_PASS
+#define PLM_VIDEO_IDCT_NATIVE PLM_VIDEO_IDCT_VECTOR
+#else
+#define PLM_VIDEO_IDCT_NATIVE PLM_VIDEO_IDCT_ORIGINAL
+#endif
+#ifndef PLM_VIDEO_IDCT
+#define PLM_VIDEO_IDCT PLM_VIDEO_IDCT_ORIGINAL
+#endif
+#if PLM_VIDEO_IDCT != PLM_VIDEO_IDCT_ORIGINAL && PLM_VIDEO_IDCT != PLM_VIDEO_IDCT_SCALAR16 && PLM_VIDEO_IDCT != PLM_VIDEO_IDCT_VECTOR
+#error Invalid PLM_VIDEO_IDCT backend
+#endif
+#if PLM_VIDEO_IDCT == PLM_VIDEO_IDCT_VECTOR && !defined(PLM_IDCT_VECTOR_PASS)
+#error No vector IDCT is available for this target
+#endif
+/* The original transform works on premultiplied 32-bit coefficients. The
+ * 16-bit transforms take dequantized coefficients directly and work in place;
+ * their block has one padding row, so that a vector implementation may load
+ * two rows at a time. A platform header may define PLM_VIDEO_BLOCK_ALIGNED
+ * as the alignment attribute its vector implementation needs. */
+#ifndef PLM_VIDEO_BLOCK_ALIGNED
+#define PLM_VIDEO_BLOCK_ALIGNED
+#endif
+#if PLM_VIDEO_IDCT == PLM_VIDEO_IDCT_ORIGINAL
+#define PLM_VIDEO_DC_SHIFT 8
+#define PLM_VIDEO_BLOCK_SIZE 64
+typedef int plm_video_coeff_t;
+#else
+#define PLM_VIDEO_DC_SHIFT 3
+#define PLM_VIDEO_BLOCK_SIZE 72
+typedef int16_t plm_video_coeff_t;
+#endif
 
 
 #ifdef __cplusplus
@@ -2796,7 +2842,7 @@ struct plm_video_t {
 
 	uint8_t *frames_data;
 
-	int block_data[64];
+	plm_video_coeff_t block_data[PLM_VIDEO_BLOCK_SIZE] PLM_VIDEO_BLOCK_ALIGNED;
 	uint8_t intra_quant_matrix[64];
 	uint8_t non_intra_quant_matrix[64];
 
@@ -2826,7 +2872,7 @@ void plm_video_copy_macroblock(plm_video_t *self, plm_frame_t *s, int motion_h, 
 void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int motion_h, int motion_v);
 void plm_video_process_macroblock(plm_video_t *self, uint8_t *s, uint8_t *d, int mh, int mb, int bs, int interp);
 void plm_video_decode_block(plm_video_t *self, int block);
-void plm_video_idct(int *block);
+void plm_video_idct(plm_video_coeff_t *block);
 
 plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_when_done) {
 	plm_video_t *self = (plm_video_t *)PLM_MALLOC(sizeof(plm_video_t));
@@ -3510,7 +3556,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		self->dc_predictor[plane_index] = self->block_data[0];
 
 		// Dequantize + premultiply
-		self->block_data[0] <<= (3 + 5);
+		self->block_data[0] <<= PLM_VIDEO_DC_SHIFT;
 
 		quant_matrix = self->intra_quant_matrix;
 		n = 1;
@@ -3531,7 +3577,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	plm_buffer_t *buffer = self->buffer;
 	const int intra = self->macroblock_intra;
 	const int quantizer_scale = self->quantizer_scale;
-	int *block_data = self->block_data;
+	plm_video_coeff_t *block_data = self->block_data;
 	int level = 0;
 	while (TRUE) {
 		int run = 0;
@@ -3651,8 +3697,13 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 			level = -2048;
 		}
 
-		// Save premultiplied coefficient
+		// The original transform expects premultiplied coefficients; the
+		// normalized 16-bit transforms consume dequantized MPEG coefficients.
+		#if PLM_VIDEO_IDCT == PLM_VIDEO_IDCT_ORIGINAL
 		block_data[de_zig_zagged] = level * PLM_VIDEO_PREMULTIPLIER_MATRIX[de_zig_zagged];
+		#else
+		block_data[de_zig_zagged] = level;
+		#endif
 	}
 
 	// Move block to its place
@@ -3677,12 +3728,12 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		di = ((self->mb_row * self->luma_width) << 2) + (self->mb_col << 3);
 	}
 
-	int *s = self->block_data;
+	plm_video_coeff_t *s = self->block_data;
 	uint8_t *row = d + di;
 	if (self->macroblock_intra) {
 		// Overwrite (no prediction)
 		if (n == 1) {
-			int clamped = plm_clamp((s[0] + 128) >> 8);
+			int clamped = plm_clamp((s[0] + (1 << (PLM_VIDEO_DC_SHIFT - 1))) >> PLM_VIDEO_DC_SHIFT);
 			for (int y = 0; y < 8; y++, row += dw) {
 				memset(row, clamped, 8);
 			}
@@ -3701,7 +3752,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	else {
 		// Add data to the predicted macroblock
 		if (n == 1) {
-			int value = (s[0] + 128) >> 8;
+			int value = (s[0] + (1 << (PLM_VIDEO_DC_SHIFT - 1))) >> PLM_VIDEO_DC_SHIFT;
 			if (value != 0) { // Adding zero leaves the prediction as it is
 				for (int y = 0; y < 8; y++, row += dw) {
 					for (int x = 0; x < 8; x += 4) {
@@ -3727,6 +3778,9 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 }
 
+#if PLM_VIDEO_IDCT != PLM_VIDEO_IDCT_ORIGINAL
+#include "pl_mpeg_idct.h"
+#else
 void plm_video_idct(int *block) {
 	int
 		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
@@ -3813,6 +3867,8 @@ void plm_video_idct(int *block) {
 		block[7 + i] = (y4 - b7 + 128) >> 8;
 	}
 }
+
+#endif
 
 // YCbCr conversion following the BT.601 standard:
 // https://infogalactic.com/info/YCbCr#ITU-R_BT.601_conversion

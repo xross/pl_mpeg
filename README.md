@@ -14,8 +14,13 @@ decoder optimisations, aimed at small embedded targets. The API is unchanged.
 window with an 8 bit code table, the inverse DCT skips columns and rows that
 only have a first coefficient, motion compensation and block output work four
 pixels at a time, and start codes are found by scanning the buffered data.
+- An optional 16 bit inverse DCT, off by default; see
+[Build options](#build-options).
 - Two fixes: the last reference frame is returned when a stream ends with a B
 frame, and the end of a buffer is registered when it is signalled while empty.
+
+With the default options the library is still a single file. The optional
+inverse DCT adds `pl_mpeg_idct.h`; keep it next to `pl_mpeg.h`.
 
 
 ## Why?
@@ -48,6 +53,30 @@ make extract # only build pl_mpeg_extract_frames
 make player_gl # only build pl_mpeg_player_gl
 make player_sdl # only build pl_mpeg_player_sdl
 ```
+
+Tests for the optional inverse DCT are in `tests/`:
+
+```shell
+cmake -S tests -B build-tests
+cmake --build build-tests
+ctest --test-dir build-tests
+```
+
+
+## Build options
+
+Define these before including `pl_mpeg.h` with `PL_MPEG_IMPLEMENTATION`. The
+defaults keep the original arithmetic.
+
+`PLM_VIDEO_IDCT` selects the inverse DCT:
+
+- `PLM_VIDEO_IDCT_ORIGINAL` (default): the original 32 bit transform.
+- `PLM_VIDEO_IDCT_SCALAR16`: an orthonormal Q14 transform on 16 bit
+coefficients, with different rounding. This is the portable model for vector
+implementations; it is slower than the original and not an optimisation.
+- `PLM_VIDEO_IDCT_VECTOR`: a platform vector implementation, bit-identical to
+`SCALAR16`. It is a compile error where the platform provides none.
+- `PLM_VIDEO_IDCT_NATIVE`: `VECTOR` where there is one, `ORIGINAL` elsewhere.
 
 
 ## Encoding for PL_MPEG
