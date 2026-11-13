@@ -3367,18 +3367,6 @@ void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int mot
 	plm_video_process_macroblock(self, s->cb.data, d->cb.data, motion_h / 2, motion_v / 2, 8, TRUE);
 }
 
-#define PLM_BLOCK_SET(DEST, DEST_INDEX, DEST_WIDTH, SOURCE_INDEX, SOURCE_WIDTH, BLOCK_SIZE, OP) do { \
-	int dest_scan = DEST_WIDTH - BLOCK_SIZE; \
-	int source_scan = SOURCE_WIDTH - BLOCK_SIZE; \
-	for (int y = 0; y < BLOCK_SIZE; y++) { \
-		for (int x = 0; x < BLOCK_SIZE; x++) { \
-			DEST[DEST_INDEX] = OP; \
-			SOURCE_INDEX++; DEST_INDEX++; \
-		} \
-		SOURCE_INDEX += source_scan; \
-		DEST_INDEX += dest_scan; \
-	}} while(FALSE)
-
 // Motion compensation works on four pixels at a time, held in one 32 bit word.
 // Loads and stores go through memcpy, so any alignment is fine, and every
 // byte lane is processed independently, so any byte order is fine.
@@ -3457,6 +3445,22 @@ void plm_video_process_macroblock(
 		}
 	}
 }
+
+// Store four pixel values, each clamped to 0..255. Values are nearly always
+// in range already, so test all four at once and only clamp when needed.
+#define PLM_STORE_CLAMPED(DEST, A, B, C, D) do { \
+	int v0 = (A), v1 = (B), v2 = (C), v3 = (D); \
+	if (((v0 | v1 | v2 | v3) & ~255) != 0) { \
+		v0 = plm_clamp(v0); v1 = plm_clamp(v1); \
+		v2 = plm_clamp(v2); v3 = plm_clamp(v3); \
+	} \
+	PLM_STORE_PIXELS(DEST, v0, v1, v2, v3); \
+	} while (FALSE)
+
+#define PLM_STORE_PIXELS(DEST, V0, V1, V2, V3) do { \
+	(DEST)[0] = (uint8_t)(V0); (DEST)[1] = (uint8_t)(V1); \
+	(DEST)[2] = (uint8_t)(V2); (DEST)[3] = (uint8_t)(V3); \
+	} while (FALSE)
 
 void plm_video_decode_block(plm_video_t *self, int block) {
 
@@ -3659,17 +3663,23 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 
 	int *s = self->block_data;
-	int si = 0;
+	uint8_t *row = d + di;
 	if (self->macroblock_intra) {
 		// Overwrite (no prediction)
 		if (n == 1) {
 			int clamped = plm_clamp((s[0] + 128) >> 8);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, clamped);
+			for (int y = 0; y < 8; y++, row += dw) {
+				memset(row, clamped, 8);
+			}
 			s[0] = 0;
 		}
 		else {
 			plm_video_idct(s);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(s[si]));
+			for (int y = 0; y < 8; y++, row += dw, s += 8) {
+				for (int x = 0; x < 8; x += 4) {
+					PLM_STORE_CLAMPED(row + x, s[x], s[x + 1], s[x + 2], s[x + 3]);
+				}
+			}
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
 	}
@@ -3677,12 +3687,26 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		// Add data to the predicted macroblock
 		if (n == 1) {
 			int value = (s[0] + 128) >> 8;
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + value));
+			if (value != 0) { // Adding zero leaves the prediction as it is
+				for (int y = 0; y < 8; y++, row += dw) {
+					for (int x = 0; x < 8; x += 4) {
+						PLM_STORE_CLAMPED(row + x,
+							row[x] + value, row[x + 1] + value,
+							row[x + 2] + value, row[x + 3] + value);
+					}
+				}
+			}
 			s[0] = 0;
 		}
 		else {
 			plm_video_idct(s);
-			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + s[si]));
+			for (int y = 0; y < 8; y++, row += dw, s += 8) {
+				for (int x = 0; x < 8; x += 4) {
+					PLM_STORE_CLAMPED(row + x,
+						row[x] + s[x], row[x + 1] + s[x + 1],
+						row[x + 2] + s[x + 2], row[x + 3] + s[x + 3]);
+				}
+			}
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
 	}
