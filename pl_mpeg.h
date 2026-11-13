@@ -3379,6 +3379,26 @@ void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int mot
 		DEST_INDEX += dest_scan; \
 	}} while(FALSE)
 
+// Motion compensation works on four pixels at a time, held in one 32 bit word.
+// Loads and stores go through memcpy, so any alignment is fine, and every
+// byte lane is processed independently, so any byte order is fine.
+
+static inline uint32_t plm_load_word(const uint8_t *p) {
+	uint32_t word;
+	memcpy(&word, p, sizeof(word));
+	return word;
+}
+
+static inline void plm_store_word(uint8_t *p, uint32_t word) {
+	memcpy(p, &word, sizeof(word));
+}
+
+// (a + b + 1) >> 1 for each of the four bytes, with no carry between them
+// A function rather than a macro: load/extract expressions are evaluated once.
+static inline uint32_t plm_average_word(uint32_t a, uint32_t b) {
+	return (a | b) - (((a ^ b) >> 1) & 0x7f7f7f7f);
+}
+
 void plm_video_process_macroblock(
 	plm_video_t *self, uint8_t *s, uint8_t *d,
 	int motion_h, int motion_v, int block_size, int interpolate
@@ -3398,24 +3418,44 @@ void plm_video_process_macroblock(
 		return; // corrupt video
 	}
 
-	#define PLM_MB_CASE(INTERPOLATE, ODD_H, ODD_V, OP) \
-		case ((INTERPOLATE << 2) | (ODD_H << 1) | (ODD_V)): \
-			PLM_BLOCK_SET(d, di, dw, si, dw, block_size, OP); \
-			break
-
-	switch ((interpolate << 2) | (odd_h << 1) | (odd_v)) {
-		PLM_MB_CASE(0, 0, 0, (s[si]));
-		PLM_MB_CASE(0, 0, 1, (s[si] + s[si + dw] + 1) >> 1);
-		PLM_MB_CASE(0, 1, 0, (s[si] + s[si + 1] + 1) >> 1);
-		PLM_MB_CASE(0, 1, 1, (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2);
-
-		PLM_MB_CASE(1, 0, 0, (d[di] + (s[si]) + 1) >> 1);
-		PLM_MB_CASE(1, 0, 1, (d[di] + ((s[si] + s[si + dw] + 1) >> 1) + 1) >> 1);
-		PLM_MB_CASE(1, 1, 0, (d[di] + ((s[si] + s[si + 1] + 1) >> 1) + 1) >> 1);
-		PLM_MB_CASE(1, 1, 1, (d[di] + ((s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2) + 1) >> 1);
+	// Each case computes, for all four pixels in a word, the same value as
+	// the per-pixel expression given beside it.
+	const uint8_t *sp = s + si;
+	uint8_t *dp = d + di;
+	int mode = (odd_h << 1) | odd_v;
+	for (int y = 0; y < block_size; y++, sp += dw, dp += dw) {
+		for (int x = 0; x < block_size; x += 4) {
+			const uint8_t *p = sp + x;
+			uint32_t a = plm_load_word(p); // s[si]
+			if (mode == 1) {
+				// (s[si] + s[si + dw] + 1) >> 1
+				a = plm_average_word(a, plm_load_word(p + dw));
+			}
+			else if (mode == 2) {
+				// (s[si] + s[si + 1] + 1) >> 1
+				a = plm_average_word(a, plm_load_word(p + 1));
+			}
+			else if (mode == 3) {
+				// (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2,
+				// summed in 16 bit lanes so that no carry is lost
+				uint32_t b = plm_load_word(p + 1);
+				uint32_t c = plm_load_word(p + dw);
+				uint32_t e = plm_load_word(p + dw + 1);
+				uint32_t even =
+					((a & 0x00ff00ff) + (b & 0x00ff00ff) + (c & 0x00ff00ff) +
+					(e & 0x00ff00ff) + 0x00020002) >> 2;
+				uint32_t odd =
+					(((a >> 8) & 0x00ff00ff) + ((b >> 8) & 0x00ff00ff) +
+					((c >> 8) & 0x00ff00ff) + ((e >> 8) & 0x00ff00ff) + 0x00020002) >> 2;
+				a = (even & 0x00ff00ff) | ((odd & 0x00ff00ff) << 8);
+			}
+			if (interpolate) {
+				// (d[di] + prediction + 1) >> 1
+				a = plm_average_word(plm_load_word(dp + x), a);
+			}
+			plm_store_word(dp + x, a);
+		}
 	}
-
-	#undef PLM_MB_CASE
 }
 
 void plm_video_decode_block(plm_video_t *self, int block) {
