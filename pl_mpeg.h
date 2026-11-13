@@ -1724,16 +1724,31 @@ int plm_buffer_next_start_code(plm_buffer_t *self) {
 	plm_buffer_align(self);
 
 	while (plm_buffer_has(self, (5 << 3))) {
+		// At least 5 bytes are available from here. Scan everything that is
+		// already buffered before asking plm_buffer_has() again, instead of
+		// once per byte. A start code is 00 00 01 xx; if the third byte of a
+		// candidate is above 1, none can begin at it or the two bytes before.
+		const uint8_t *bytes = self->bytes;
 		size_t byte_index = (self->bit_index) >> 3;
-		if (
-			self->bytes[byte_index] == 0x00 &&
-			self->bytes[byte_index + 1] == 0x00 &&
-			self->bytes[byte_index + 2] == 0x01
-		) {
-			self->bit_index = (byte_index + 4) << 3;
-			return self->bytes[byte_index + 3];
+		size_t end = self->length - 4; // First index without 5 bytes available
+		while (byte_index < end) {
+			if (bytes[byte_index + 2] > 0x01) {
+				byte_index += 3;
+			}
+			else if (
+				bytes[byte_index] == 0x00 &&
+				bytes[byte_index + 1] == 0x00 &&
+				bytes[byte_index + 2] == 0x01
+			) {
+				self->bit_index = (byte_index + 4) << 3;
+				return bytes[byte_index + 3];
+			}
+			else {
+				byte_index++;
+			}
 		}
-		self->bit_index += 8;
+		// Not found: leave the position where the per-byte scan would have
+		self->bit_index = end << 3;
 	}
 	return -1;
 }
