@@ -7,9 +7,11 @@ See [pl_mpeg.h](pl_mpeg.h) for the documentation.
 
 ## This fork
 
-This is a fork of [phoboslab/pl_mpeg](https://github.com/phoboslab/pl_mpeg). The
-API is unchanged.
+This is a fork of [phoboslab/pl_mpeg](https://github.com/phoboslab/pl_mpeg) with
+decoder optimisations, aimed at small embedded targets. The API is unchanged.
 
+- Faster portable code, always on: DCT coefficients are decoded from a 32 bit
+window with an 8 bit code table.
 - Two fixes: the last reference frame is returned when a stream ends with a B
 frame, and the end of a buffer is registered when it is signalled while empty.
 

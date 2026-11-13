@@ -2695,6 +2695,38 @@ static const plm_vlc_uint_t PLM_VIDEO_DCT_COEFF[] = {
 	{       0,   0x1c01}, {       0,   0x1b01},  // 111: 0000 0000 0001 111x
 };
 
+// First-level lookup for PLM_VIDEO_DCT_COEFF, indexed by the next 8 bits of
+// the bitstream. Each entry is the state the bit-by-bit walk of that table
+// reaches after consuming those bits, or after fewer if a code ends sooner.
+// Most coefficients have short codes, so one lookup usually replaces the walk.
+
+typedef struct {
+	int16_t index;
+	uint16_t value;
+	uint8_t used;
+} plm_vlc_prefix_t;
+
+static plm_vlc_prefix_t plm_video_dct_coeff_prefix[256];
+static int plm_video_dct_coeff_prefix_ready = FALSE;
+
+static void plm_video_init_dct_coeff_prefix(void) {
+	if (plm_video_dct_coeff_prefix_ready) {
+		return;
+	}
+	for (int prefix = 0; prefix < 256; prefix++) {
+		plm_vlc_uint_t state = {0, 0};
+		int used = 0;
+		do {
+			state = PLM_VIDEO_DCT_COEFF[state.index + ((prefix >> (7 - used)) & 1)];
+			used++;
+		} while (state.index > 0 && used < 8);
+		plm_video_dct_coeff_prefix[prefix].index = state.index;
+		plm_video_dct_coeff_prefix[prefix].value = state.value;
+		plm_video_dct_coeff_prefix[prefix].used = used;
+	}
+	plm_video_dct_coeff_prefix_ready = TRUE;
+}
+
 typedef struct {
 	int full_px;
 	int is_set;
@@ -2787,6 +2819,7 @@ plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_whe
 	
 	self->buffer = buffer;
 	self->destroy_buffer_when_done = destroy_when_done;
+	plm_video_init_dct_coeff_prefix();
 
 	// Attempt to decode the sequence header
 	self->start_code = plm_buffer_find_start_code(self->buffer, PLM_START_SEQUENCE);
@@ -3428,36 +3461,112 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 
 	// Decode AC coefficients (+DC for non-intra)
+	//
+	// One coefficient needs at most 28 bits: a 6 bit escape code, 6 bit run
+	// and 16 bit level. All other codes are at most 16 bits plus a sign or
+	// end-of-block bit. While at least 48 bits remain in the buffer, take a
+	// 32 bit window at the read position once and decode the whole coefficient
+	// from it, instead of making a bounds-checked function call per bit. With
+	// fewer bits left, or for a code longer than any valid one, fall back to
+	// the regular reads so that behaviour at the end of the data is unchanged.
+	plm_buffer_t *buffer = self->buffer;
+	const int intra = self->macroblock_intra;
+	const int quantizer_scale = self->quantizer_scale;
+	int *block_data = self->block_data;
 	int level = 0;
 	while (TRUE) {
 		int run = 0;
-		uint16_t coeff = plm_buffer_read_vlc_uint(self->buffer, PLM_VIDEO_DCT_COEFF);
+		uint16_t coeff;
+		size_t bit_index = buffer->bit_index;
+		int fast = ((buffer->length << 3) - bit_index) >= 48;
+		uint32_t window = 0;
+		unsigned used = 0;
+		#define PLM_WINDOW_READ(COUNT) \
+			(used += (COUNT), (int)((window << (used - (COUNT))) >> (32 - (COUNT))))
 
-		if ((coeff == 0x0001) && (n > 0) && (plm_buffer_read(self->buffer, 1) == 0)) {
-			// end_of_block
-			break;
+		if (fast) {
+			const uint8_t *bytes = buffer->bytes + (bit_index >> 3);
+			unsigned shift = bit_index & 7;
+			window =
+				((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+				((uint32_t)bytes[2] << 8) | bytes[3];
+			if (shift) {
+				window = (window << shift) | (bytes[4] >> (8 - shift));
+			}
+			// Start from the state reached after the first (up to) 8 bits,
+			// then walk any remaining bits of a longer code one at a time
+			const plm_vlc_prefix_t *prefix = &plm_video_dct_coeff_prefix[window >> 24];
+			plm_vlc_uint_t state = {prefix->index, prefix->value};
+			used = prefix->used;
+			while (state.index > 0 && used < 17) {
+				state = PLM_VIDEO_DCT_COEFF[state.index + ((window >> (31 - used)) & 1)];
+				used++;
+			}
+			coeff = state.value;
+			if (state.index > 0) {
+				fast = FALSE; // Not a valid code; decode it the regular way
+			}
 		}
-		if (coeff == 0xffff) {
-			// escape
-			run = plm_buffer_read(self->buffer, 6);
-			level = plm_buffer_read(self->buffer, 8);
-			if (level == 0) {
-				level = plm_buffer_read(self->buffer, 8);
+
+		if (fast) {
+			if ((coeff == 0x0001) && (n > 0) && (PLM_WINDOW_READ(1) == 0)) {
+				// end_of_block
+				buffer->bit_index = bit_index + used;
+				break;
 			}
-			else if (level == 128) {
-				level = plm_buffer_read(self->buffer, 8) - 256;
+			if (coeff == 0xffff) {
+				// escape
+				run = PLM_WINDOW_READ(6);
+				level = PLM_WINDOW_READ(8);
+				if (level == 0) {
+					level = PLM_WINDOW_READ(8);
+				}
+				else if (level == 128) {
+					level = PLM_WINDOW_READ(8) - 256;
+				}
+				else if (level > 128) {
+					level = level - 256;
+				}
 			}
-			else if (level > 128) {
-				level = level - 256;
+			else {
+				run = coeff >> 8;
+				level = coeff & 0xff;
+				if (PLM_WINDOW_READ(1)) {
+					level = -level;
+				}
 			}
+			buffer->bit_index = bit_index + used;
 		}
 		else {
-			run = coeff >> 8;
-			level = coeff & 0xff;
-			if (plm_buffer_read(self->buffer, 1)) {
-				level = -level;
+			coeff = plm_buffer_read_vlc_uint(buffer, PLM_VIDEO_DCT_COEFF);
+
+			if ((coeff == 0x0001) && (n > 0) && (plm_buffer_read(buffer, 1) == 0)) {
+				// end_of_block
+				break;
+			}
+			if (coeff == 0xffff) {
+				// escape
+				run = plm_buffer_read(buffer, 6);
+				level = plm_buffer_read(buffer, 8);
+				if (level == 0) {
+					level = plm_buffer_read(buffer, 8);
+				}
+				else if (level == 128) {
+					level = plm_buffer_read(buffer, 8) - 256;
+				}
+				else if (level > 128) {
+					level = level - 256;
+				}
+			}
+			else {
+				run = coeff >> 8;
+				level = coeff & 0xff;
+				if (plm_buffer_read(buffer, 1)) {
+					level = -level;
+				}
 			}
 		}
+		#undef PLM_WINDOW_READ
 
 		n += run;
 		if (n < 0 || n >= 64) {
@@ -3469,10 +3578,10 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 
 		// Dequantize, oddify, clip
 		level = (unsigned)level << 1;
-		if (!self->macroblock_intra) {
+		if (!intra) {
 			level += (level < 0 ? -1 : 1);
 		}
-		level = (level * self->quantizer_scale * quant_matrix[de_zig_zagged]) >> 4;
+		level = (level * quantizer_scale * quant_matrix[de_zig_zagged]) >> 4;
 		if ((level & 1) == 0) {
 			level -= level > 0 ? 1 : -1;
 		}
@@ -3484,7 +3593,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		}
 
 		// Save premultiplied coefficient
-		self->block_data[de_zig_zagged] = level * PLM_VIDEO_PREMULTIPLIER_MATRIX[de_zig_zagged];
+		block_data[de_zig_zagged] = level * PLM_VIDEO_PREMULTIPLIER_MATRIX[de_zig_zagged];
 	}
 
 	// Move block to its place
