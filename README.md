@@ -8,7 +8,8 @@ See [pl_mpeg.h](pl_mpeg.h) for the documentation.
 ## This fork
 
 This is a fork of [phoboslab/pl_mpeg](https://github.com/phoboslab/pl_mpeg) with
-decoder optimisations, aimed at small embedded targets. The API is unchanged.
+decoder optimisations, aimed at small embedded targets and at XMOS xcore in
+particular. The API is unchanged.
 
 - Faster portable code, always on: DCT coefficients are decoded from a 32 bit
 window with an 8 bit code table, the inverse DCT skips columns and rows that
@@ -19,12 +20,14 @@ pixels at a time, and start codes are found by scanning the buffered data.
 - Platform hooks: a platform header can replace word access, block copies, pixel
 stores, the inverse DCT pass and the audio accumulation. See the comments at
 each hook in `pl_mpeg.h`.
+- An xcore platform header in [xcore/](xcore/), included automatically on xcore
+targets, with aligned word access and an XS3 vector unit block copy.
 - Two fixes: the last reference frame is returned when a stream ends with a B
 frame, and the end of a buffer is registered when it is signalled while empty.
 
 With the default options the library is still a single file. The optional
-backends add `pl_mpeg_idct.h` and `pl_mpeg_audio.h`; keep these next to
-`pl_mpeg.h`.
+backends add `pl_mpeg_idct.h` and `pl_mpeg_audio.h`, and xcore targets add the
+`xcore/` directory; keep these next to `pl_mpeg.h`.
 
 
 ## Why?
@@ -36,9 +39,10 @@ MPEG1 is an old and inefficient codec, but it's still good enough for many use
 cases. All patents related to MPEG1 and MP2 have expired, so it's completely
 free now.
 
-This library does not make use of any SIMD instructions, but because of
+The portable code does not make use of any SIMD instructions, but because of
 the relative simplicity of the codec it still manages to decode 4k60fps video
-on a single CPU core (on my i7-6700k at least).
+on a single CPU core (on my i7-6700k at least). The only vector code is the
+optional xcore XS3 specialisation.
 
 
 ## Building
@@ -87,6 +91,13 @@ only floating-point rounding in the MP2 decoder. `FAST_SCALE` scales PCM with a
 reciprocal. `FAST_WINDOW` uses fused accumulation in the synthesis window; it
 requires C99 `fmaf` (link libm where the platform requires it), unless a
 platform header provides `PLM_AUDIO_ACCUMULATE`.
+
+### xcore
+
+`xcore/pl_mpeg_xcore.h` is included whenever `__xcore__` is defined. Its hooks
+give the same decoded output as the portable code they replace.
+
+- `PLM_MALLOC` must return memory aligned to at least four bytes.
 
 
 ## Encoding for PL_MPEG

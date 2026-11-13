@@ -149,6 +149,13 @@ See below for detailed the API documentation.
 #include <stdio.h>
 #endif
 
+/* Platform specialisations. A platform header may define the PLM_* hooks
+ * described where they are used below. None is required: without them the
+ * portable code is used. */
+#if defined(__xcore__)
+#include "xcore/pl_mpeg_xcore.h"
+#endif
+
 /* Optional decoder backends. Defaults retain the original arithmetic.
  * SCALAR16 is an orthonormal Q14 transform on 16-bit coefficients, with
  * different rounding. It is the portable C model for vector implementations
