@@ -1567,6 +1567,11 @@ size_t plm_buffer_write(plm_buffer_t *self, uint8_t *bytes, size_t length) {
 
 void plm_buffer_signal_end(plm_buffer_t *self) {
 	self->total_size = self->length;
+	// A total_size of 0 means the size is unknown, so an end signalled with
+	// nothing left in the buffer has to be recorded directly.
+	if (self->length == 0) {
+		self->has_ended = TRUE;
+	}
 }
 
 void plm_buffer_set_load_callback(plm_buffer_t *self, plm_buffer_load_callback fp, void *user) {

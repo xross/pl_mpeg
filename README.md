@@ -10,7 +10,8 @@ See [pl_mpeg.h](pl_mpeg.h) for the documentation.
 This is a fork of [phoboslab/pl_mpeg](https://github.com/phoboslab/pl_mpeg). The
 API is unchanged.
 
-- A fix: the last reference frame is returned when a stream ends with a B frame.
+- Two fixes: the last reference frame is returned when a stream ends with a B
+frame, and the end of a buffer is registered when it is signalled while empty.
 
 
 ## Why?
