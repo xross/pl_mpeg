@@ -2,8 +2,15 @@
 
 Single-file MIT licensed library for C/C++
 
-See [pl_mpeg.h](https://github.com/phoboslab/pl_mpeg/blob/master/pl_mpeg.h) for
-the documentation.
+See [pl_mpeg.h](pl_mpeg.h) for the documentation.
+
+
+## This fork
+
+This is a fork of [phoboslab/pl_mpeg](https://github.com/phoboslab/pl_mpeg). The
+API is unchanged.
+
+- A fix: the last reference frame is returned when a stream ends with a B frame.
 
 
 ## Why?

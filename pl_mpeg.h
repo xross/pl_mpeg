@@ -2863,15 +2863,14 @@ plm_frame_t *plm_video_decode(plm_video_t *self) {
 			self->start_code = plm_buffer_find_start_code(self->buffer, PLM_START_PICTURE);
 			
 			if (self->start_code == -1) {
-				// If we reached the end of the file and the previously decoded
-				// frame was a reference frame, we still have to return it.
+				// If we reached the end of the file, the last reference frame
+				// has not been returned yet: it is displayed after any B
+				// frames that follow it in the stream. Return it now, whatever
+				// the type of the last decoded picture.
 				if (
 					self->has_reference_frame &&
 					!self->assume_no_b_frames &&
-					plm_buffer_has_ended(self->buffer) && (
-						self->picture_type == PLM_VIDEO_PICTURE_TYPE_INTRA ||
-						self->picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE
-					)
+					plm_buffer_has_ended(self->buffer)
 				) {
 					self->has_reference_frame = FALSE;
 					frame = &self->frame_backward;
