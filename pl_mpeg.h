@@ -3655,6 +3655,18 @@ void plm_video_idct(int *block) {
 
 	// Transform columns
 	for (int i = 0; i < 8; ++i) {
+		// With only the first coefficient of a column non-zero, every term
+		// below except m0 evaluates to exactly zero and all eight outputs
+		// equal m0. Sparse blocks make this the common case.
+		if ((block[1 * 8 + i] | block[2 * 8 + i] | block[3 * 8 + i] | block[4 * 8 + i] |
+			block[5 * 8 + i] | block[6 * 8 + i] | block[7 * 8 + i]) == 0
+		) {
+			m0 = block[0 * 8 + i];
+			block[1 * 8 + i] = m0; block[2 * 8 + i] = m0; block[3 * 8 + i] = m0;
+			block[4 * 8 + i] = m0; block[5 * 8 + i] = m0; block[6 * 8 + i] = m0;
+			block[7 * 8 + i] = m0;
+			continue;
+		}
 		b1 = block[4 * 8 + i];
 		b3 = block[2 * 8 + i] + block[6 * 8 + i];
 		b4 = block[5 * 8 + i] - block[3 * 8 + i];
@@ -3685,6 +3697,15 @@ void plm_video_idct(int *block) {
 
 	// Transform rows
 	for (int i = 0; i < 64; i += 8) {
+		// As for columns; all eight outputs equal (m0 + 128) >> 8.
+		if ((block[1 + i] | block[2 + i] | block[3 + i] | block[4 + i] |
+			block[5 + i] | block[6 + i] | block[7 + i]) == 0
+		) {
+			m0 = (block[0 + i] + 128) >> 8;
+			block[0 + i] = m0; block[1 + i] = m0; block[2 + i] = m0; block[3 + i] = m0;
+			block[4 + i] = m0; block[5 + i] = m0; block[6 + i] = m0; block[7 + i] = m0;
+			continue;
+		}
 		b1 = block[4 + i];
 		b3 = block[2 + i] + block[6 + i];
 		b4 = block[5 + i] - block[3 + i];
