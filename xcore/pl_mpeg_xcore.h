@@ -21,16 +21,37 @@
 #define PLM_WORD_ACCESS
 typedef uint32_t __attribute__((may_alias)) plm_word_t;
 
+#define PLM_ALIGNED_WORD_ACCESS
+#define PLM_WORD_LITTLE_ENDIAN 1
+/* Retain the existing padded-word lookahead contract on xcore. */
+#define PLM_WORD_LOOKAHEAD 1
+
+static inline const uint8_t *plm_word_begin(const uint8_t *p, unsigned *position)
+{
+    *position = ((uintptr_t)p & 3) << 3;
+    return (const uint8_t *)((uintptr_t)p & ~(uintptr_t)3);
+}
+
+static inline uint32_t plm_load_motion_word(const uint8_t *p)
+{
+    return *(const plm_word_t *)p;
+}
+
+static inline uint32_t plm_extract_word(uint32_t high, uint32_t low, unsigned position)
+{
+    uint32_t word;
+    __asm__("lextract %0, %1, %2, %3, 32" : "=r"(word) : "r"(high), "r"(low), "r"(position));
+    return word;
+}
+
 /* Build the word from the two aligned words that contain it, with one
  * LEXTRACT (operands: high word, low word, bit position). The second aligned
  * load retains the existing padded-word lookahead contract. */
 static inline uint32_t plm_load_word(const uint8_t *p)
 {
-    unsigned position = ((uintptr_t)p & 3) << 3;
-    const plm_word_t *w = (const plm_word_t *)((uintptr_t)p & ~(uintptr_t)3);
-    uint32_t word;
-    __asm__("lextract %0, %1, %2, %3, 32" : "=r"(word) : "r"(w[1]), "r"(w[0]), "r"(position));
-    return word;
+    unsigned position;
+    const uint8_t *base = plm_word_begin(p, &position);
+    return plm_extract_word(plm_load_motion_word(base + 4), plm_load_motion_word(base), position);
 }
 
 /* Words are only stored to macroblock positions in a frame, which are word

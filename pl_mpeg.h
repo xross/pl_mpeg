@@ -3446,7 +3446,7 @@ void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int mot
 }
 
 // Motion compensation works on four pixels at a time, held in one 32 bit word.
-// The portable path uses memcpy and independent byte lanes (any byte order).
+// The portable path uses memcpy and independent byte lanes (little/big-endian).
 // A platform header may define PLM_WORD_ACCESS and provide these three
 // functions itself, for example where frames are known to be word aligned.
 
@@ -3469,11 +3469,107 @@ static inline uint32_t plm_load_stored_word(const uint8_t *p) {
 
 #endif
 
+// Word representation follows the platform's word access hooks. The default
+// memcpy hooks use native byte order; a platform or test model can state it.
+static inline int plm_word_little_endian(void) {
+#ifdef PLM_WORD_LITTLE_ENDIAN
+	return PLM_WORD_LITTLE_ENDIAN;
+#else
+	const uint32_t one = 1;
+	return *(const uint8_t *)&one;
+#endif
+}
+
+// Portable reads start at the logical pixel address, without alignment or
+// padding requirements. A platform may align down and replace extraction and
+// raw loads, but the sliding window and prediction loops remain shared.
+// PLM_ALIGNED_WORD_ACCESS supplies these three functions. Positions are bit
+// offsets 0, 8, 16 or 24 within the first raw word, in pixel/byte order.
+#ifndef PLM_ALIGNED_WORD_ACCESS
+static inline const uint8_t *plm_word_begin(const uint8_t *p, unsigned *position) {
+	*position = 0;
+	return p;
+}
+
+static inline uint32_t plm_load_motion_word(const uint8_t *p) {
+	return plm_load_word(p);
+}
+
+static inline uint32_t plm_extract_word(uint32_t high, uint32_t low, unsigned position) {
+	if (!position) return low;
+	return plm_word_little_endian()
+		? (low >> position) | (high << (32 - position))
+		: (low << position) | (high >> (32 - position));
+}
+#endif
+
+#ifndef PLM_WORD_LOOKAHEAD
+#define PLM_WORD_LOOKAHEAD 0
+#endif
+
+// Load only the one extra pixel needed by horizontal interpolation at a
+// portable row's tail. Full-word lookahead is opt-in, never assumed there.
+static inline uint32_t plm_load_next_word(const uint8_t *p, int full, int adjacent) {
+	if (full) return plm_load_motion_word(p);
+	if (adjacent) return plm_word_little_endian() ? (uint32_t)*p : (uint32_t)*p << 24;
+	return 0;
+}
+
+// The word starting one pixel later, assembled without another overlapping
+// word load. This is byte-order-independent, including the last word in a row.
+static inline uint32_t plm_adjacent_word(uint32_t word, uint32_t high, unsigned position) {
+	return plm_word_little_endian()
+		? (word >> 8) | ((high >> position) << 24)
+		: (word << 8) | ((high << position) >> 24);
+}
+
 // (a + b + 1) >> 1 for each of the four bytes, with no carry between them
 // A function rather than a macro: load/extract expressions are evaluated once.
 static inline uint32_t plm_average_word(uint32_t a, uint32_t b) {
 	return (a | b) - (((a ^ b) >> 1) & 0x7f7f7f7f);
 }
+
+// MODE and BLEND are constants in each expansion: dispatch once per block,
+// not once per group of four pixels. Carry the next word into the next group,
+// sharing loads between overlapping horizontal predictions. The four-sample
+// average and the separate bidirectional rounding step match the scalar MPEG
+// expressions exactly; nested rounded two-sample averages would not.
+#define PLM_PREDICT_BLOCK(MODE, BLEND) do { \
+	const uint8_t *row = source; \
+	for (int y = 0; y < block_size; y++, row += dw, dp += dw) { \
+		uint32_t low = plm_load_motion_word(row), below_low = 0; \
+		if ((MODE) & 1) below_low = plm_load_motion_word(row + dw); \
+		for (int x = 0; x < block_size; x += 4) { \
+			int full = PLM_WORD_LOOKAHEAD || position || x + 4 < block_size; \
+			uint32_t high = plm_load_next_word(row + x + 4, full, (MODE) & 2); \
+			uint32_t a = plm_extract_word(high, low, position); \
+			if ((MODE) == 1) { \
+				uint32_t below_high = plm_load_next_word(row + dw + x + 4, full, 0); \
+				a = plm_average_word(a, plm_extract_word(below_high, below_low, position)); \
+				below_low = below_high; \
+			} \
+			else if ((MODE) == 2) { \
+				a = plm_average_word(a, plm_adjacent_word(a, high, position)); \
+			} \
+			else if ((MODE) == 3) { \
+				uint32_t below_high = plm_load_next_word(row + dw + x + 4, full, 1); \
+				uint32_t b = plm_adjacent_word(a, high, position); \
+				uint32_t c = plm_extract_word(below_high, below_low, position); \
+				uint32_t e = plm_adjacent_word(c, below_high, position); \
+				uint32_t even = ((a & 0x00ff00ff) + (b & 0x00ff00ff) + \
+					(c & 0x00ff00ff) + (e & 0x00ff00ff) + 0x00020002) >> 2; \
+				uint32_t odd = (((a >> 8) & 0x00ff00ff) + ((b >> 8) & 0x00ff00ff) + \
+					((c >> 8) & 0x00ff00ff) + ((e >> 8) & 0x00ff00ff) + 0x00020002) >> 2; \
+				a = (even & 0x00ff00ff) | ((odd & 0x00ff00ff) << 8); \
+				below_low = below_high; \
+			} \
+			if (BLEND) a = plm_average_word(plm_load_stored_word(dp + x), a); \
+			plm_store_word(dp + x, a); \
+			low = high; \
+		} \
+	} \
+	return; \
+} while (FALSE)
 
 void plm_video_process_macroblock(
 	plm_video_t *self, uint8_t *s, uint8_t *d,
@@ -3481,24 +3577,18 @@ void plm_video_process_macroblock(
 ) {
 	int dw = self->mb_width * block_size;
 
-	int hp = motion_h >> 1;
-	int vp = motion_v >> 1;
-	int odd_h = (motion_h & 1) == 1;
-	int odd_v = (motion_v & 1) == 1;
-
-	unsigned int si = ((self->mb_row * block_size) + vp) * dw + (self->mb_col * block_size) + hp;
 	unsigned int di = (self->mb_row * dw + self->mb_col) * block_size;
+	unsigned int si = di + (motion_v >> 1) * dw + (motion_h >> 1);
 	
 	unsigned int max_address = (dw * (self->mb_height * block_size - block_size + 1) - block_size);
 	if (si > max_address || di > max_address) {
 		return; // corrupt video
 	}
 
-	// Each case computes, for all four pixels in a word, the same value as
-	// the per-pixel expression given beside it.
+	// Select one of four pixel predictions, with or without rounded blending.
 	const uint8_t *sp = s + si;
 	uint8_t *dp = d + di;
-	int mode = (odd_h << 1) | odd_v;
+	int mode = ((motion_h & 1) << 1) | (motion_v & 1);
 
 	// A platform header may define PLM_COPY_BLOCK to copy a full-pixel
 	// prediction itself. It returns zero to leave the block to the loop below.
@@ -3508,40 +3598,21 @@ void plm_video_process_macroblock(
 	}
 #endif
 
-	for (int y = 0; y < block_size; y++, sp += dw, dp += dw) {
-		for (int x = 0; x < block_size; x += 4) {
-			const uint8_t *p = sp + x;
-			uint32_t a = plm_load_word(p); // s[si]
-			if (mode == 1) {
-				// (s[si] + s[si + dw] + 1) >> 1
-				a = plm_average_word(a, plm_load_word(p + dw));
-			}
-			else if (mode == 2) {
-				// (s[si] + s[si + 1] + 1) >> 1
-				a = plm_average_word(a, plm_load_word(p + 1));
-			}
-			else if (mode == 3) {
-				// (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2,
-				// summed in 16 bit lanes so that no carry is lost
-				uint32_t b = plm_load_word(p + 1);
-				uint32_t c = plm_load_word(p + dw);
-				uint32_t e = plm_load_word(p + dw + 1);
-				uint32_t even =
-					((a & 0x00ff00ff) + (b & 0x00ff00ff) + (c & 0x00ff00ff) +
-					(e & 0x00ff00ff) + 0x00020002) >> 2;
-				uint32_t odd =
-					(((a >> 8) & 0x00ff00ff) + ((b >> 8) & 0x00ff00ff) +
-					((c >> 8) & 0x00ff00ff) + ((e >> 8) & 0x00ff00ff) + 0x00020002) >> 2;
-				a = (even & 0x00ff00ff) | ((odd & 0x00ff00ff) << 8);
-			}
-			if (interpolate) {
-				// (d[di] + prediction + 1) >> 1
-				a = plm_average_word(plm_load_stored_word(dp + x), a);
-			}
-			plm_store_word(dp + x, a);
-		}
+	unsigned position;
+	const uint8_t *source = plm_word_begin(sp, &position);
+	switch ((mode << 1) | !!interpolate) {
+		case 0: PLM_PREDICT_BLOCK(0, 0);
+		case 1: PLM_PREDICT_BLOCK(0, 1);
+		case 2: PLM_PREDICT_BLOCK(1, 0);
+		case 3: PLM_PREDICT_BLOCK(1, 1);
+		case 4: PLM_PREDICT_BLOCK(2, 0);
+		case 5: PLM_PREDICT_BLOCK(2, 1);
+		case 6: PLM_PREDICT_BLOCK(3, 0);
+		case 7: PLM_PREDICT_BLOCK(3, 1);
 	}
 }
+
+#undef PLM_PREDICT_BLOCK
 
 // Store four pixel values, each clamped to 0..255. Values are nearly always
 // in range already, so test all four at once and only clamp when needed.
