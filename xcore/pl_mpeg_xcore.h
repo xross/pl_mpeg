@@ -76,6 +76,16 @@ static inline uint32_t plm_load_stored_word(const uint8_t *p)
 
 #ifdef __XS3A__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+void plm_audio_window_s32_xs3(int32_t *, const int32_t *, const int32_t *, unsigned);
+#ifdef __cplusplus
+}
+#endif
+#define PLM_AUDIO_WINDOW_S32(OUT, WINDOW, HISTORY, POSITION) \
+    plm_audio_window_s32_xs3((OUT), (WINDOW), (HISTORY), (POSITION))
+
 /* ---- Full-pixel motion prediction ---------------------------------------
  * A full-pixel prediction from a word aligned source is a plain copy. Load 32
  * bytes into a vector register and store only the first block_size of them,

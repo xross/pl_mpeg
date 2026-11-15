@@ -93,6 +93,42 @@ reciprocal. `FAST_WINDOW` uses fused accumulation in the synthesis window; it
 requires C99 `fmaf` (link libm where the platform requires it), unless a
 platform header provides `PLM_AUDIO_ACCUMULATE`.
 
+`PLM_AUDIO_FORMAT` defaults to `PLM_AUDIO_FORMAT_FLOAT` (`0`). Select
+`PLM_AUDIO_FORMAT_S32` (`1`) for full-scale signed 32-bit PCM. The public
+`plm_audio_sample_t` and the sample/history arrays then become `int32_t`;
+define the format consistently in every translation unit that uses this API.
+Both interleaved and `PLM_AUDIO_SEPARATE_CHANNELS` layouts are supported.
+PCM clips symmetrically to `[-INT32_MAX, INT32_MAX]`, matching XS3 VPU arithmetic,
+not wrapping. Float remains unclipped and unchanged. The float fast switches
+have no effect on S32.
+
+Integer synthesis uses Q27 butterfly coefficients and Q9 history. The generator
+`tools/audio_s32_generate.py --check` verifies the checked-in headers and proves
+an affine/rounding bound for **every** intermediate with subband input magnitude
+at most 65536. Nine is the largest safe number of history fractional bits.
+A valid stream stays within that magnitude; an invalid grouped sample code could
+reach 104848, so each grouped code is limited to the largest valid one.
+Scaled window coefficients, rounded Q30 products, an accumulator that sixteen
+products cannot saturate
+and a saturating seven-bit left shift produce Q1.31 PCM. No extra persistent
+history buffer or external math library is required. Arithmetic right shift of
+negative signed integers is required, as on the tested C99 host/xcore compilers.
+
+`PLM_AUDIO_SYNTHESIS_SCALAR` (`0`) selects the standalone portable model.
+`PLM_AUDIO_SYNTHESIS_VECTOR` (`1`) selects a platform `PLM_AUDIO_WINDOW_S32` hook
+and is a compile-time error when none exists. `PLM_AUDIO_SYNTHESIS_NATIVE`
+(the default) selects the hook when present and scalar otherwise. The transform
+remains scalar in both cases; only the 32-output synthesis window is vectorised.
+The portable 64-bit arithmetic is a correctness model, not a speed claim.
+
+The native tests compare MP2 output with pristine upstream float (peak error
+at most `2^-20` full scale and SNR at least 100 dB), and check the kernels against
+independent double/cosine references. They cover extreme/random inputs, history
+phases, saturation, canaries, short refills, failures and replay. On the full
+5042-frame reference soundtrack, measured S32 peak error was `7.82e-7` and SNR
+117.41 dB. Deliberately over-range output is tested for clipping separately;
+an unclipped float output above full scale cannot meet that error bound.
+
 ### xcore
 
 `xcore/pl_mpeg_xcore.h` is included whenever `__xcore__` is defined. Its hooks
@@ -103,6 +139,9 @@ give the same decoded output as the portable code they replace.
 alongside the implementation.
 - On XS3, `PLM_AUDIO_FAST_WINDOW` uses the FMACC instruction and does not need
 `fmaf`.
+- S32 vector synthesis requires `xcore/pl_mpeg_audio_xs3.S`. Its eight-lane Q30
+  window is bit-identical to the portable model. Inputs/output must be at least
+  word aligned; the decoder's existing doubled window and history are reused.
 
 
 ## Encoding for PL_MPEG

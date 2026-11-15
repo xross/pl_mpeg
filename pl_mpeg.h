@@ -208,6 +208,37 @@ typedef int16_t plm_video_coeff_t;
 #define PLM_AUDIO_FAST_WINDOW 0
 #endif
 
+/* PCM format is independent of float synthesis optimisations. S32 uses a
+ * portable fixed-point model; platform window hooks are optional. */
+#define PLM_AUDIO_FORMAT_FLOAT 0
+#define PLM_AUDIO_FORMAT_S32 1
+#ifndef PLM_AUDIO_FORMAT
+#define PLM_AUDIO_FORMAT PLM_AUDIO_FORMAT_FLOAT
+#endif
+#define PLM_AUDIO_SYNTHESIS_SCALAR 0
+#define PLM_AUDIO_SYNTHESIS_VECTOR 1
+#ifdef PLM_AUDIO_WINDOW_S32
+#define PLM_AUDIO_SYNTHESIS_NATIVE PLM_AUDIO_SYNTHESIS_VECTOR
+#else
+#define PLM_AUDIO_SYNTHESIS_NATIVE PLM_AUDIO_SYNTHESIS_SCALAR
+#endif
+#ifndef PLM_AUDIO_SYNTHESIS
+#define PLM_AUDIO_SYNTHESIS PLM_AUDIO_SYNTHESIS_NATIVE
+#endif
+#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+typedef int32_t plm_audio_sample_t;
+#if PLM_AUDIO_SYNTHESIS != PLM_AUDIO_SYNTHESIS_SCALAR && PLM_AUDIO_SYNTHESIS != PLM_AUDIO_SYNTHESIS_VECTOR
+#error Invalid integer audio synthesis backend
+#endif
+#if PLM_AUDIO_SYNTHESIS == PLM_AUDIO_SYNTHESIS_VECTOR && !defined(PLM_AUDIO_WINDOW_S32)
+#error No integer audio synthesis vector hook is available for this target
+#endif
+#elif PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_FLOAT
+typedef float plm_audio_sample_t;
+#else
+#error Invalid PLM_AUDIO_FORMAT
+#endif
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -278,8 +309,10 @@ typedef void(*plm_video_decode_callback)
 
 
 // Decoded Audio Samples
-// Samples are stored as normalized (-1, 1) float either interleaved, or if
-// PLM_AUDIO_SEPARATE_CHANNELS is defined, in two separate arrays.
+// Samples are normalized float by default, or saturating signed Q1.31 int32_t
+// with PLM_AUDIO_FORMAT_S32. Storage is interleaved, or in two separate arrays
+// when PLM_AUDIO_SEPARATE_CHANNELS is defined. S32 clips symmetrically to
+// [-INT32_MAX, INT32_MAX]; float retains the original, unclipped behaviour.
 // The `count` is always PLM_AUDIO_SAMPLES_PER_FRAME and just there for
 // convenience.
 
@@ -289,10 +322,10 @@ typedef struct {
 	double time;
 	unsigned int count;
 	#ifdef PLM_AUDIO_SEPARATE_CHANNELS
-		float left[PLM_AUDIO_SAMPLES_PER_FRAME];
-		float right[PLM_AUDIO_SAMPLES_PER_FRAME];
+		plm_audio_sample_t left[PLM_AUDIO_SAMPLES_PER_FRAME];
+		plm_audio_sample_t right[PLM_AUDIO_SAMPLES_PER_FRAME];
 	#else
-		float interleaved[PLM_AUDIO_SAMPLES_PER_FRAME * 2];
+		plm_audio_sample_t interleaved[PLM_AUDIO_SAMPLES_PER_FRAME * 2];
 	#endif
 } plm_samples_t;
 
@@ -4034,10 +4067,14 @@ PLM_DEFINE_FRAME_CONVERT_FUNCTION(plm_frame_to_abgr, 4, 3, 2, 1)
 // -----------------------------------------------------------------------------
 // plm_audio implementation
 
-#if PLM_AUDIO_FAST_WINDOW
+#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+#include "pl_mpeg_audio_s32.h"
+#elif PLM_AUDIO_FAST_WINDOW
 #include "pl_mpeg_audio.h"
 #endif
-#if PLM_AUDIO_FAST_SCALE
+#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+#define PLM_AUDIO_OUTPUT_SCALE(sample) (sample)
+#elif PLM_AUDIO_FAST_SCALE
 #define PLM_AUDIO_OUTPUT_SCALE(sample) ((sample) * (-1.0f / 1090519040.0f))
 #else
 #define PLM_AUDIO_OUTPUT_SCALE(sample) ((sample) / -1090519040.0f)
@@ -4267,9 +4304,9 @@ struct plm_audio_t {
 	int sample[2][32][3];
 
 	plm_samples_t samples;
-	float D[1024];
-	float V[2][1024];
-	float U[32];
+	plm_audio_sample_t D[1024];
+	plm_audio_sample_t V[2][1024];
+	plm_audio_sample_t U[32];
 };
 
 int plm_audio_find_frame_sync(plm_audio_t *self);
@@ -4288,8 +4325,13 @@ plm_audio_t *plm_audio_create_with_buffer(plm_buffer_t *buffer, int destroy_when
 	self->destroy_buffer_when_done = destroy_when_done;
 	self->samplerate_index = 3; // Indicates 0
 
+	#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+	memcpy(self->D, plm_audio_window_s32_table, 512 * sizeof(int32_t));
+	memcpy(self->D + 512, plm_audio_window_s32_table, 512 * sizeof(int32_t));
+	#else
 	memcpy(self->D, PLM_AUDIO_SYNTHESIS_WINDOW, 512 * sizeof(float));
 	memcpy(self->D + 512, PLM_AUDIO_SYNTHESIS_WINDOW, 512 * sizeof(float));
+	#endif
 
 	// Attempt to decode first header
 	self->next_frame_data_size = plm_audio_decode_header(self);
@@ -4575,6 +4617,14 @@ void plm_audio_decode_frame(plm_audio_t *self) {
 				self->v_pos = (self->v_pos - 64) & 1023;
 
 				for (int ch = 0; ch < 2; ch++) {
+					#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+					plm_audio_idct36_s32(self->sample[ch], p, self->V[ch], self->v_pos);
+					#if PLM_AUDIO_SYNTHESIS == PLM_AUDIO_SYNTHESIS_VECTOR
+					PLM_AUDIO_WINDOW_S32(self->U, self->D, self->V[ch], self->v_pos);
+					#else
+					plm_audio_window_s32(self->U, self->D, self->V[ch], self->v_pos);
+					#endif
+					#else
 					plm_audio_idct36(self->sample[ch], p, self->V[ch], self->v_pos);
 
 					// Build U, windowing, calculate output
@@ -4606,10 +4656,11 @@ void plm_audio_decode_frame(plm_audio_t *self) {
 					}
 
 					#endif
+					#endif /* PCM format */
 
 					// Output samples
 					#ifdef PLM_AUDIO_SEPARATE_CHANNELS
-						float *out_channel = ch == 0
+						plm_audio_sample_t *out_channel = ch == 0
 							? self->samples.left
 							: self->samples.right;
 						for (int j = 0; j < 32; j++) {
@@ -4663,6 +4714,10 @@ void plm_audio_read_samples(plm_audio_t *self, int ch, int sb, int part) {
 	if (q->group) {
 		// Decode grouped samples
 		val = plm_buffer_read(self->buffer, q->bits);
+		#if PLM_AUDIO_FORMAT == PLM_AUDIO_FORMAT_S32
+		// Only an invalid grouped code is out of the integer transform's range
+		val = plm_audio_group_code_s32(val, adj);
+		#endif
 		sample[0] = val % adj;
 		val /= adj;
 		sample[1] = val % adj;
