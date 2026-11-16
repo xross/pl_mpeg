@@ -1709,14 +1709,46 @@ size_t plm_buffer_tell(plm_buffer_t *self) {
 
 void plm_buffer_discard_read_bytes(plm_buffer_t *self) {
 	size_t byte_pos = self->bit_index >> 3;
+	// For a ring buffer, total_size is set only by plm_buffer_signal_end(), to
+	// the bytes held at that moment, and the end is recognised when length
+	// equals it. Discarding shortens length, so keep the two in step: otherwise
+	// an end signalled with more than one picture still buffered is never
+	// recognised, and the last picture and reference frame are not returned.
+	int end_signalled = self->mode == PLM_BUFFER_MODE_RING && self->total_size != 0;
 	if (byte_pos == self->length) {
 		self->bit_index = 0;
 		self->length = 0;
 	}
 	else if (byte_pos > 0) {
-		memmove(self->bytes, self->bytes + byte_pos, self->length - byte_pos);
+		// Move the unread bytes down by byte_pos. The original code was:
+		//
+		//     memmove(self->bytes, self->bytes + byte_pos, self->length - byte_pos);
+		//
+		// Pieces no longer than byte_pos do not overlap their destination, so
+		// memcpy may copy them instead. On some targets memmove is far slower
+		// than memcpy: 23 MB/s against 317 MB/s measured on xcore (XS3).
+		size_t remaining = self->length - byte_pos;
+		if (byte_pos < 64) {
+			memmove(self->bytes, self->bytes + byte_pos, remaining);
+		}
+		else {
+			uint8_t *to = self->bytes;
+			while (remaining) {
+				size_t piece = remaining < byte_pos ? remaining : byte_pos;
+				memcpy(to, to + byte_pos, piece);
+				to += piece;
+				remaining -= piece;
+			}
+		}
 		self->bit_index -= byte_pos << 3;
 		self->length -= byte_pos;
+	}
+	if (end_signalled) {
+		self->total_size = self->length;
+		// A total_size of 0 means the size is unknown, as in signal_end.
+		if (self->length == 0) {
+			self->has_ended = TRUE;
+		}
 	}
 }
 
@@ -3041,7 +3073,14 @@ plm_frame_t *plm_video_decode(plm_video_t *self) {
 		) {
 			return NULL;
 		}
-		plm_buffer_discard_read_bytes(self->buffer);
+		// Originally unconditional. Only the bytes up to this picture's start
+		// code have been read since the buffer was last compacted, often a
+		// handful, and moving a full buffer down by a few bytes costs as much
+		// as moving it by a picture. Writing compacts the buffer anyway, so
+		// leave a short run of read bytes in place.
+		if ((self->buffer->bit_index >> 3) >= 64) {
+			plm_buffer_discard_read_bytes(self->buffer);
+		}
 		
 		plm_video_decode_picture(self);
 

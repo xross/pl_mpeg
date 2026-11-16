@@ -15,6 +15,11 @@ particular. The API is unchanged.
 window with an 8 bit code table, the inverse DCT skips columns and rows that
 only have a first coefficient, motion compensation and block output work four
 pixels at a time, and start codes are found by scanning the buffered data.
+- Portable buffer compaction: video decoding leaves consumed prefixes shorter
+than 64 bytes in place. Larger discards move unread data using non-overlapping
+`memcpy` chunks; small shifts still use `memmove`. This avoids unnecessary data
+movement and can help targets where `memmove` is slow; the benefit is
+platform-dependent, not specific to xcore.
 - Optional decoder backends, off by default; see
 [Build options](#build-options).
 - Platform hooks: a platform header can replace word access, block copies, pixel
@@ -23,8 +28,11 @@ each hook in `pl_mpeg.h`.
 - An xcore platform header in [xcore/](xcore/), included automatically on xcore
 targets, with aligned word access, an XS3 vector unit inverse DCT and block
 copy, and an FMACC synthesis window.
-- Two fixes: the last reference frame is returned when a stream ends with a B
-frame, and the end of a buffer is registered when it is signalled while empty.
+- End-of-stream fixes: the last reference frame is returned when a stream ends
+with a B frame, and the end of a buffer is registered when it is signalled while
+empty. A signalled ring-buffer end is also preserved across compaction, so
+signalling the end with multiple pictures still buffered does not lose the
+remaining pictures or delayed reference frame.
 
 With the default options the library is still a single file. The optional
 backends add `pl_mpeg_idct.h` and `pl_mpeg_audio.h`, and xcore targets add the
@@ -63,7 +71,8 @@ make player_gl # only build pl_mpeg_player_gl
 make player_sdl # only build pl_mpeg_player_sdl
 ```
 
-Tests for the optional inverse DCT and synthesis window are in `tests/`:
+Tests for buffer compaction and EOF handling, the optional inverse DCT and
+synthesis window are in `tests/`:
 
 ```shell
 cmake -S tests -B build-tests
